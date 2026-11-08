@@ -761,8 +761,8 @@ async function runSearch(params, what) {
 
 fr.form.addEventListener('submit', (e) => {
   e.preventDefault();
-  const q = fr.q.value.trim().toUpperCase().replace(/\s+/g, '');
-  if (!q) { setStatus('Type a flight number, callsign or registration.', true); return; }
+  const q = FR.cleanIds(fr.q.value.replace(/\s+/g, ''));
+  if (!q) { setStatus('Type a flight number, callsign or registration (letters, digits and hyphens).', true); return; }
   live.demo = false;
   runSearch({ [fr.by.value]: q }, `for ${q}`);
 });
@@ -788,7 +788,6 @@ function follow(f) {
   live.flight = { ...f };
   live.fix = f; live.prevFix = null; live.turnRate = 0; live.lastFixAt = now; live.backoff = 1;
   live.pitchS = plane.pitch; live.rollS = plane.roll;
-  live.query = f.callsign ? { callsigns: f.callsign } : f.reg ? { registrations: f.reg } : { flights: f.flight };
   sim.mode = 'follow';
   if (sim.view === 'orbit') setView('cockpit');
   sim.paused = false;
@@ -815,8 +814,12 @@ async function poll() {
   if (document.hidden) { schedulePoll(5000); return; } // don't spend credits in a background tab
   live.polling = true;
   try {
-    const list = await live.client.live({ ...live.query, limit: 10 }, 'light');
-    const rec = list.find((r) => r.id && r.id === live.flight.id) || (list.length === 1 ? list[0] : null);
+    const pred = FR.extrapolate(live.fix, Date.now(), live.turnRate);
+    const query = FR.followQuery(live.flight, { lat: pred.lat, lon: pred.lon, gs: pred.gs }, +fr.interval.value);
+    const byArea = !!query.bounds;
+    const list = await live.client.live({ ...query, limit: byArea ? 100 : 10 }, 'light');
+    // Match by fr24_id; an identifier query with exactly one hit is safe to take, an area query is not.
+    const rec = list.find((r) => r.id && r.id === live.flight.id) || (!byArea && list.length === 1 ? list[0] : null);
     if (!rec) {
       setStatus('No live position in the last update: landed, out of coverage, or the flight ended. Holding the last known track.', true);
     } else if (rec.t > live.fix.t) {
@@ -836,7 +839,7 @@ async function poll() {
     live.backoff = 1;
   } catch (e) {
     setStatus(e.message || String(e), true);
-    if (e.kind === 'auth' || e.kind === 'credits' || e.kind === 'network') {
+    if (e.kind === 'auth' || e.kind === 'credits' || e.kind === 'network' || e.kind === 'validation') {
       live.polling = false;
       setStatus(`${e.message} Live updates paused; still dead-reckoning from the last position.`, true);
       return; // stop polling until the user presses "Update now"
@@ -927,4 +930,4 @@ setView('cockpit');
 highlightPresets();
 
 // Debug/automation hook (used by the smoke test; harmless in production).
-window.__sim = { plane, sim, live, setAltitude, goTo, setView, startDemo, terrainStats: () => terrainProvider.stats() };
+window.__sim = { plane, sim, live, poll, setAltitude, goTo, setView, startDemo, terrainStats: () => terrainProvider.stats() };

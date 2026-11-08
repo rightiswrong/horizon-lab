@@ -35,10 +35,13 @@ test('parseRecord rejects records without coordinates', () => {
   assert.equal(F.parseRecord({ callsign: 'X' }), null);
 });
 
-test('boundsAround is north,south,west,east and wraps the antimeridian', () => {
+test('boundsAround is north,south,west,east with west < east (clipped, never wrapped)', () => {
   assert.equal(F.boundsAround(0, 0, 111.32), '1.000,-1.000,-1.000,1.000');
-  const [, , w, e] = F.boundsAround(0, 179.5 * DEG, 111.32).split(',').map(Number);
-  near(w, 178.5, 1e-3); near(e, -179.5, 1e-3);
+  const [n, s, w, e] = F.boundsAround(0, 179.5 * DEG, 111.32).split(',').map(Number);
+  assert.ok(n > s && w < e);
+  near(w, 178.5, 1e-3); near(e, 180, 1e-3);
+  const polar = F.boundsAround(89.5 * DEG, 10 * DEG, 300).split(',').map(Number);
+  assert.ok(polar[0] <= 89.9 && polar[2] === -180 && polar[3] === 180);
 });
 
 test('extrapolate: 450 kt for 60 s due east covers ~13.9 km', () => {
@@ -104,4 +107,33 @@ test('mock client returns API-shaped records that move over time', async () => {
   m.t0 -= 60000;
   const [b] = await m.live({ callsigns: 'DEMO123' });
   assert.ok(Math.abs(b.lon - a.lon) > 1e-3);
+});
+
+// Regression: following an aircraft with no callsign/registration/flight number sent only
+// `limit=10`, which the API rejects with 400 "Validation failed".
+test('followQuery never produces a limit-only query', () => {
+  const anon = { id: 'abc', callsign: null, reg: null, flight: null, lat: 0.5, lon: 0.5, gs: 200 };
+  const q = F.followQuery(anon);
+  assert.ok(q.bounds && F.hasFilter(q));
+  assert.deepEqual(F.followQuery({ ...anon, callsign: 'baw117 ' }), { callsigns: 'BAW117' });
+  assert.deepEqual(F.followQuery({ ...anon, reg: 'g-xwba' }), { registrations: 'G-XWBA' });
+  assert.deepEqual(F.followQuery({ ...anon, flight: 'BA117' }), { flights: 'BA117' });
+  assert.deepEqual(F.followQuery({ ...anon, callsign: '***' }), { bounds: q.bounds }); // junk callsign → area
+});
+
+test('cleanIds strips invalid characters and caps at 15', () => {
+  assert.equal(F.cleanIds(' ba 117, g-xwba;'), 'BA117,G-XWBA');
+  assert.equal(F.cleanIds(Array.from({ length: 20 }, (_, i) => `A${i}`).join(',')).split(',').length, 15);
+  assert.equal(F.cleanIds(null), '');
+});
+
+test('client refuses to send a live request without a filter', async () => {
+  globalThis.fetch = async () => { throw new Error('must not be called'); };
+  await assert.rejects(new F.FR24Client({ token: 'k' }).live({ limit: 10 }, 'light'), (e) => e.kind === 'validation');
+});
+
+test('400 errors surface field details and the rejected query', async () => {
+  globalThis.fetch = async () => new Response(JSON.stringify({ message: 'Validation failed', details: { bounds: ['The bounds field format is invalid.'] } }), { status: 400 });
+  await assert.rejects(new F.FR24Client({ token: 'k' }).live({ bounds: '1,0,5,2', limit: 5 }, 'light'), (e) =>
+    e.kind === 'validation' && /bounds: The bounds field format is invalid/.test(e.message) && /request: \/live\/flight-positions\/light\?bounds=/.test(e.message));
 });

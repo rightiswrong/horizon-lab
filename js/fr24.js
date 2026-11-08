@@ -60,16 +60,55 @@ export function describe(f) {
   return parts.join(' · ');
 }
 
-/** FR24 bounds string "north,south,west,east" for a box of ±radiusKm around a point (radians in). */
+/**
+ * FR24 bounds string "north,south,west,east" for a box of ±radiusKm around a point (radians in).
+ * The box is clipped (not wrapped) at the antimeridian and kept off the exact poles, so west < east
+ * and north > south always hold; the API rejects anything else with "Validation failed".
+ */
 export function boundsAround(lat, lon, radiusKm) {
   const dLat = radiusKm / 111.32;
   const dLon = radiusKm / (111.32 * Math.max(0.05, Math.cos(lat)));
-  const la = lat / DEG, lo = lon / DEG;
-  const n = Math.min(90, la + dLat), s = Math.max(-90, la - dLat);
+  const la = lat / DEG, lo = ((lon / DEG + 540) % 360) - 180;
+  const n = Math.min(89.9, la + dLat), s = Math.max(-89.9, la - dLat);
   let w = lo - dLon, e = lo + dLon;
-  if (w < -180) w += 360;
-  if (e > 180) e -= 360;
+  // A box that reaches a pole, or spans the globe, covers every longitude.
+  if (e - w >= 360 || la + dLat >= 89.9 || la - dLat <= -89.9) { w = -180; e = 180; }
+  w = Math.max(-180, w); e = Math.min(180, e);
   return [n, s, w, e].map((v) => v.toFixed(3)).join(',');
+}
+
+/** Clean a user- or API-supplied identifier list: uppercase, A–Z/0–9/hyphen only, max 15 items. */
+export function cleanIds(v) {
+  return String(v ?? '')
+    .toUpperCase()
+    .split(',')
+    .map((x) => x.replace(/[^A-Z0-9-]/g, ''))
+    .filter(Boolean)
+    .slice(0, 15)
+    .join(',');
+}
+
+/**
+ * Query used to re-poll a followed flight. The live endpoints can't filter by fr24_id, so use the
+ * most specific identifier the flight has. Aircraft with none (common for private, military and
+ * MLAT-only targets) fall back to a small box around where the aircraft should be now, and the
+ * caller matches the result by fr24_id.
+ */
+export function followQuery(f, pred, intervalS = 20) {
+  const cs = cleanIds(f.callsign);
+  if (cs) return { callsigns: cs };
+  const reg = cleanIds(f.reg);
+  if (reg) return { registrations: reg };
+  const fl = cleanIds(f.flight);
+  if (fl) return { flights: fl };
+  const p = pred || f;
+  const radiusKm = Math.min(150, 25 + ((p.gs || 0) * intervalS * 2) / 1000);
+  return { bounds: boundsAround(p.lat, p.lon, radiusKm) };
+}
+
+/** True when params contain at least one filter other than limit (the API requires one). */
+export function hasFilter(params) {
+  return Object.entries(params || {}).some(([k, v]) => k !== 'limit' && v !== undefined && v !== null && String(v) !== '');
 }
 
 /** Signed smallest difference a − b between two angles (radians), in (−π, π]. */
@@ -112,6 +151,21 @@ export function bankFor(gs, turnRate) {
   return Math.max(-35 * DEG, Math.min(35 * DEG, Math.atan((gs * turnRate) / 9.81)));
 }
 
+/** Flatten FR24 error JSON ({message, details:{field:[msgs]}} or similar) into one line. */
+export function describeErrorBody(j) {
+  if (!j || typeof j !== 'object') return '';
+  const parts = [];
+  const head = j.message || j.error || j.title;
+  if (head) parts.push(String(head));
+  const d = j.details ?? j.errors;
+  if (typeof d === 'string') parts.push(d);
+  else if (Array.isArray(d)) parts.push(d.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))).join('; '));
+  else if (d && typeof d === 'object') {
+    parts.push(Object.entries(d).map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : typeof v === 'string' ? v : JSON.stringify(v)}`).join('; '));
+  }
+  return parts.filter(Boolean).join(' — ').slice(0, 300);
+}
+
 export class FR24Error extends Error {
   constructor(message, kind, status) { super(message); this.kind = kind; this.status = status; }
 }
@@ -133,6 +187,9 @@ export class FR24Client {
 
   async get(path, params) {
     if (!this.token && !this.viaProxy) throw new FR24Error('Enter a Flightradar24 API key first.', 'auth');
+    if (path.startsWith('/live/') && !hasFilter(params)) {
+      throw new FR24Error('Nothing to search for: this request had no flight, callsign, registration or area filter.', 'validation');
+    }
     const headers = { Accept: 'application/json', 'Accept-Version': 'v1' };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     let res;
@@ -153,8 +210,10 @@ export class FR24Client {
     }
     if (!res.ok) {
       let detail = '';
-      try { const j = await res.json(); detail = j.message || j.details || j.error || ''; } catch { /* ignore */ }
-      throw new FR24Error(`Flightradar24 error ${res.status}${detail ? `: ${detail}` : ''}`, 'http', res.status);
+      try { detail = describeErrorBody(await res.json()); } catch { /* not JSON */ }
+      const query = new URLSearchParams(Object.entries(params || {}).filter(([, v]) => v !== undefined && v !== null && v !== '')).toString();
+      const kind = res.status === 400 || res.status === 422 ? 'validation' : 'http';
+      throw new FR24Error(`Flightradar24 error ${res.status}${detail ? `: ${detail}` : ''} (request: ${path}${query ? `?${query}` : ''})`, kind, res.status);
     }
     const body = await res.json();
     return Array.isArray(body?.data) ? body.data : [];
@@ -182,10 +241,11 @@ export class MockFR24Client {
       ['DEMO9', 'C172', 'HNL', 'OGG', 4500, 105, 40, 0, -0.9],
       ['DEMO400', 'B77W', 'DXB', 'SYD', 41000, 510, 300, 0, 0.4],
       ['DEMOGA', 'PC12', 'SFO', 'RNO', 18000, 260, 65, 1200, -0.3],
+      ['', 'GLF5', null, null, 43000, 470, 200, 0, 0.1], // no callsign/reg/flight, like many MLAT targets
     ];
     this.ac = specs.map(([cs, type, o, d, alt, gs, trk, vs, turn], i) => ({
-      fr24_id: `de${(0x1000 + i).toString(16)}`, hex: `ABC${i}`, callsign: cs, flight: cs.replace('DEMO', 'DM'),
-      type, reg: `N${100 + i}DM`, painted_as: 'DMO', operating_as: 'DMO', orig_iata: o, dest_iata: d,
+      fr24_id: `de${(0x1000 + i).toString(16)}`, hex: `ABC${i}`, callsign: cs, flight: cs ? cs.replace('DEMO', 'DM') : null,
+      type, reg: cs ? `N${100 + i}DM` : null, painted_as: 'DMO', operating_as: 'DMO', orig_iata: o, dest_iata: d,
       lat0: centerLat / DEG + (i - 2) * 0.35, lon0: centerLon / DEG + ((i * 7) % 5 - 2) * 0.4,
       alt0: alt, gspeed: gs, track0: trk, vspeed: vs, turnDegS: turn,
     }));
@@ -219,9 +279,13 @@ export class MockFR24Client {
   async live(params) {
     const now = Date.now();
     await new Promise((r) => setTimeout(r, 250));
+    if (!hasFilter(params) && Object.keys(params).some((k) => k !== 'limit')) throw new FR24Error('Validation failed (mock)', 'validation', 400);
     const want = (params.callsigns || params.flights || params.registrations || '').toUpperCase().split(',').filter(Boolean);
+    const box = params.bounds ? params.bounds.split(',').map(Number) : null;
     return this.ac
-      .filter((a) => !want.length || want.includes(a.callsign) || want.includes(a.flight) || want.includes(a.reg))
-      .map((a) => parseRecord(this.record(a, now), now));
+      .map((a) => this.record(a, now))
+      .filter((r) => !want.length || want.includes(r.callsign) || want.includes(r.flight) || want.includes(r.reg))
+      .filter((r) => !box || (r.lat <= box[0] && r.lat >= box[1] && r.lon >= box[2] && r.lon <= box[3]))
+      .map((r) => parseRecord(r, now));
   }
 }
