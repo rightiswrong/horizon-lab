@@ -1,0 +1,12 @@
+{
+  "name": "horizon-flight-sim",
+  "version": "1.0.0",
+  "description": "Browser flight sim showing how altitude sets the distance to the visible horizon",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test",
+    "start": "python3 -m http.server 8080"
+  },
+  "license": "MIT"
+}

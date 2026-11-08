@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <title>Horizon Flight Simulator</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Ccircle cx=%2216%22 cy=%2236%22 r=%2224%22 fill=%22%231d3b5a%22/%3E%3Cpath d=%22M2 14h28%22 stroke=%22%234fd6ff%22 stroke-width=%223%22/%3E%3C/svg%3E">
+  <meta name="description" content="Fly over a real-imagery globe and watch how altitude sets the distance to the horizon.">
+  <script>window.CESIUM_BASE_URL = './vendor/cesium/';</script>
+  <script src="./vendor/cesium/Cesium.js"></script>
+  <link rel="stylesheet" href="./vendor/cesium/Widgets/widgets.css">
+  <link rel="stylesheet" href="./css/style.css">
+</head>
+<body>
+  <div id="cesium"></div>
+  <canvas id="hud"></canvas>
+
+  <!-- Primary flight readout -->
+  <section id="readout" aria-live="off">
+    <div class="horizon-big">
+      <span class="label">Horizon</span>
+      <span id="r-horizon" class="value">–</span>
+      <span id="r-horizon-sub" class="sub">line of sight</span>
+    </div>
+    <div class="grid">
+      <div><span class="label">ALT</span><span id="r-alt" class="value">–</span></div>
+      <div><span class="label">AGL</span><span id="r-agl" class="value">–</span></div>
+      <div><span class="label">SPD</span><span id="r-spd" class="value">–</span></div>
+      <div><span class="label">HDG</span><span id="r-hdg" class="value">–</span></div>
+      <div><span class="label">V/S</span><span id="r-vs" class="value">–</span></div>
+      <div><span class="label">THR</span><span id="r-thr" class="value">–</span></div>
+    </div>
+    <div id="r-flags" class="flags"></div>
+  </section>
+
+  <!-- Altitude tape (height indicator) -->
+  <section id="tape" aria-hidden="true">
+    <canvas id="tape-canvas"></canvas>
+  </section>
+
+  <button id="panel-toggle" class="chip" aria-expanded="true" aria-controls="panel">Horizon lab</button>
+
+  <!-- Horizon lab side panel -->
+  <aside id="panel">
+    <h2>Horizon lab</h2>
+
+    <div class="stats">
+      <div><span class="label">Line of sight <i>d</i></span><span id="p-d" class="value">–</span></div>
+      <div><span class="label">Along surface <i>s</i></span><span id="p-s" class="value">–</span></div>
+      <div><span class="label">With refraction</span><span id="p-dr" class="value">–</span></div>
+      <div><span class="label">Horizon dip</span><span id="p-dip" class="value">–</span></div>
+      <div><span class="label">Earth visible</span><span id="p-frac" class="value">–</span></div>
+      <div><span class="label">Everest visible to</span><span id="p-ev" class="value">–</span></div>
+    </div>
+
+
+    <h3>Live flight · Flightradar24</h3>
+    <div id="fr24" class="fr24">
+      <label class="field">API key
+        <span class="row">
+          <input id="fr-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your FR24 API token">
+          <button id="fr-key-show" class="chip" type="button">Show</button>
+        </span>
+      </label>
+      <div class="row wrap">
+        <label class="check"><input type="checkbox" id="fr-sandbox"> Sandbox key</label>
+        <label class="check"><input type="checkbox" id="fr-remember"> Remember on this device</label>
+      </div>
+      <details class="adv">
+        <summary>Advanced</summary>
+        <label class="field">Proxy URL (optional)
+          <input id="fr-proxy" type="url" spellcheck="false" placeholder="https://fr24-proxy.you.workers.dev">
+        </label>
+        <label class="field">Update every
+          <select id="fr-interval">
+            <option value="10">10 s</option><option value="20" selected>20 s</option><option value="60">60 s</option>
+          </select>
+        </label>
+        <p class="note">Each update spends API credits. Updates use the cheaper "light" endpoint, and the view dead-reckons smoothly between them.</p>
+      </details>
+      <form id="fr-search" class="row">
+        <select id="fr-by" aria-label="Search by">
+          <option value="flights">Flight no.</option>
+          <option value="callsigns">Callsign</option>
+          <option value="registrations">Registration</option>
+        </select>
+        <input id="fr-q" placeholder="e.g. BA117" autocapitalize="characters" spellcheck="false" aria-label="Search">
+        <button class="chip" type="submit">Find</button>
+      </form>
+      <div class="row wrap">
+        <button id="fr-nearby" class="chip" type="button">Flights near me</button>
+        <button id="fr-demo" class="chip" type="button">Demo traffic (no key)</button>
+      </div>
+      <div id="fr-status" class="note" role="status"></div>
+      <div id="fr-results" class="results"></div>
+      <div id="fr-follow" class="follow" hidden>
+        <div id="fr-follow-title" class="follow-title"></div>
+        <div id="fr-follow-meta" class="note"></div>
+        <div class="row wrap">
+          <button id="fr-refresh" class="chip" type="button">Update now</button>
+          <button id="fr-take" class="chip" type="button">Take the controls</button>
+          <button id="fr-stop" class="chip" type="button">Stop following</button>
+        </div>
+      </div>
+    </div>
+
+    <h3>Cross-section</h3>
+    <canvas id="side" width="320" height="190"></canvas>
+    <p id="side-note" class="note"></p>
+
+    <h3>Distance vs height</h3>
+    <canvas id="chart" width="320" height="200"></canvas>
+
+    <h3>Quick previews · altitude</h3>
+    <div id="alt-presets" class="chips"></div>
+
+    <h3>Quick previews · location</h3>
+    <div id="loc-presets" class="chips"></div>
+
+    <h3>Settings</h3>
+    <div class="settings">
+      <label>Imagery
+        <select id="s-imagery">
+          <option value="s2-2020">Sentinel-2 cloudless 2020 (satellite)</option>
+          <option value="s2-2016">Sentinel-2 cloudless 2016 (satellite, CC BY)</option>
+          <option value="osm">OpenStreetMap (map)</option>
+        </select>
+      </label>
+      <label>View
+        <select id="s-view">
+          <option value="cockpit">Cockpit</option>
+          <option value="chase">Chase</option>
+          <option value="orbit">Overview of horizon ring (drag to rotate)</option>
+        </select>
+      </label>
+      <label>Time warp
+        <select id="s-warp">
+          <option value="1">1×</option><option value="5">5×</option>
+          <option value="25">25×</option><option value="100">100×</option>
+        </select>
+      </label>
+      <label class="check"><input type="checkbox" id="s-terrain" checked> 3D terrain</label>
+      <label class="check"><input type="checkbox" id="s-ring" checked> Horizon ring on globe</label>
+      <label class="check"><input type="checkbox" id="s-hud" checked> HUD horizon lines</label>
+      <label class="check"><input type="checkbox" id="s-hold"> Altitude hold</label>
+      <label class="check"><input type="checkbox" id="s-invert"> Invert pitch</label>
+    </div>
+
+    <details id="math">
+      <summary>The math</summary>
+      <p>Observer at height <i>h</i> above a sphere of radius <i>R</i>. The sight line to the horizon is tangent to the surface, so it meets the radius at a right angle.</p>
+      <p class="eq">d² + R² = (R + h)²<br>d = √(2Rh + h²) ≈ √(2Rh)</p>
+      <p>On Earth that is <b>d ≈ 3.57 √h km</b> with <i>h</i> in metres.</p>
+      <p class="eq">cos θ = R / (R + h)<br>s = R·θ &nbsp;&nbsp; dip = θ</p>
+      <p>θ is the angle at Earth's centre. It is also how far the horizon sits below eye level (dip). <i>s</i> is the distance you would travel over the ground to reach it.</p>
+      <p class="eq">R′ = R / (1 − k), k ≈ 0.13</p>
+      <p>Refraction bends light around the bulge a little. This is the same as a ~15% larger Earth: <b>d ≈ 3.86 √h km</b>. The 3D view is drawn without refraction, so the ring uses the geometric value.</p>
+      <p class="eq">fraction visible = h / (2(R + h))</p>
+      <p>Seeing a peak of height <i>H</i>: d<sub>max</sub> = √(2Rh) + √(2RH).</p>
+    </details>
+
+    <p class="credits">Engine: CesiumJS (Apache-2.0). Imagery: Sentinel-2 cloudless by EOX (contains modified Copernicus Sentinel data) or © OpenStreetMap contributors. Terrain: AWS Terrain Tiles. Live flight data: Flightradar24 API (your own key).</p>
+  </aside>
+
+  <!-- Touch controls -->
+  <div id="touch" hidden>
+    <div id="stick"><div id="stick-knob"></div></div>
+    <div id="throttle"><div id="throttle-fill"></div><span>THR</span></div>
+    <div id="touch-buttons">
+      <button class="chip" data-act="view">View</button>
+      <button class="chip" data-act="hold">Hold</button>
+    </div>
+  </div>
+
+  <div id="help" class="help">
+    <b>W/S</b> or <b>↑/↓</b> pitch · <b>A/D</b> or <b>←/→</b> roll · <b>Q/E</b> yaw · <b>Shift/Ctrl</b> throttle ·
+    <b>1–9</b> altitude presets · <b>C</b> view · <b>H</b> alt hold · <b>T</b> time warp · <b>P</b> pause · <b>M</b> panel
+  </div>
+
+  <div id="toast" role="status"></div>
+
+  <div id="intro">
+    <div class="card">
+      <h1>Horizon Flight Simulator</h1>
+      <p>The higher you fly, the farther the horizon. Climb and watch the blue ring: it marks the exact edge of what you can see, worked out from <i>d = √(2Rh + h²)</i>.</p>
+      <p class="small">Got a Flightradar24 API key? Open the Horizon lab to ride along with a real flight and see its horizon live.</p>
+      <p class="small">Keyboard: arrows or WASD, Shift/Ctrl throttle, number keys jump altitude. On touch screens, use the stick and throttle.</p>
+      <button id="start" class="primary">Start flying</button>
+    </div>
+  </div>
+
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

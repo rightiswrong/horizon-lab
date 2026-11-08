@@ -1,0 +1,9 @@
+name = "fr24-proxy"
+main = "fr24-proxy.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+# Comma-separated list of sites allowed to use this proxy. Use your GitHub Pages origin,
+# e.g. "https://your-user.github.io". Add "http://localhost:8080" for local testing.
+# Avoid "*" if you store FR24_API_KEY as a secret, or anyone could spend your credits.
+ALLOWED_ORIGINS = "https://YOUR-USER.github.io,http://localhost:8080"
