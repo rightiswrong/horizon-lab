@@ -8,11 +8,15 @@
 // Secret:   wrangler secret put FR24_API_KEY        (optional — otherwise the page sends the user's key)
 // Origins:  set ALLOWED_ORIGINS in wrangler.toml to your GitHub Pages origin.
 //
-// Only read-only live-position endpoints (and sandbox equivalents) are forwarded, so a leaked
-// proxy URL can't be used to query other, more expensive endpoints.
+// Only the read-only endpoints the game uses (live positions, one flight's track, airport lookup,
+// and their sandbox equivalents) are forwarded, so a leaked proxy URL can't reach anything else.
 
 const UPSTREAM = 'https://fr24api.flightradar24.com';
-const ALLOWED_PATH = /^\/api\/(sandbox\/)?live\/flight-positions\/(light|full|count)$/;
+const ALLOWED_PATH = new RegExp([
+  '^/api/(sandbox/)?live/flight-positions/(light|full|count)$', // live positions
+  '^/api/(sandbox/)?flight-tracks$',                             // flown path of one flight
+  '^/api/(sandbox/)?static/airports/[A-Za-z0-9]{3,4}/(light|full)$', // airport fallback lookup
+].join('|'));
 
 export default {
   async fetch(request, env) {

@@ -90,6 +90,17 @@ button.primary { font-size: 15px; padding: 12px 22px; background: var(--horizon)
 .follow-title { font: 600 14px var(--mono); }
 .follow-title::before { content: "● "; color: var(--warn); animation: blink 1.4s infinite; }
 @keyframes blink { 50% { opacity: 0.25; } }
+.muted { color: var(--muted); font-size: 11px; }
+.route { display: grid; gap: 4px; border-top: 1px solid var(--line); padding-top: 8px; }
+.route-row { display: grid; grid-template-columns: 10px 34px minmax(0, 1fr); gap: 6px; align-items: baseline; font-size: 12px; }
+.route-row .label { display: inline; }
+.route-row .rv { font-family: var(--mono); overflow-wrap: anywhere; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.from { background: #7ee081; } .dot.to { background: #ffd166; }
+.atc { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-top: 8px; }
+.atc a { color: var(--horizon); }
+.atc .chip { text-decoration: none; color: var(--text); }
+.atc .chip::after { content: " ↗"; color: var(--muted); }
 .flags .live { color: #ff8f8f; font-weight: 700; }
 
 details#math { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 12px; font-size: 13px; line-height: 1.5; color: #cbd5e1; }

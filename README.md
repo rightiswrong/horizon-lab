@@ -35,6 +35,19 @@ In the **Horizon lab → Live flight** panel you can pick a real aircraft. The s
 2. Paste the key, then either search by **flight number**, **callsign** or **registration**, or tap **Flights near me** (a 300 km box around your position).
 3. Tap a result, or click a red traffic marker on the globe. **Take the controls** hands the aircraft over to you mid-flight. **Demo traffic** shows the feature with simulated aircraft and no key.
 
+### Route, flown path and ATC audio
+Three options in the Live flight panel (remembered per device):
+
+| Option | What you get | API cost |
+|---|---|---|
+| **Airports & route** | FROM/TO airport markers with live distance labels (marked *below horizon* until they could actually be seen), the planned great circle, and the remaining leg from the aircraft to the destination (dashed, with a ~3° descent at the end). The panel shows the distance flown and to go, the ETA, and how far past the horizon the destination still is. | None: coordinates come from the bundled OurAirports table (`data/airports.json`, ~5,800 airports, public domain). FR24's `/static/airports/{code}/full` is used only for codes not in the table. |
+| **Flown path** | The actual track so far at true altitude (orange), from `GET /api/flight-tracks?flight_id=…`, extended with each live update. | One flight-tracks call per flight you follow (FR24 charges per point returned) |
+| **ATC audio links** | Buttons for the **departure**, **nearest** and **arrival** airports that open that airport's page on [LiveATC.net](https://www.liveatc.net/), where you can listen in their player. | None |
+
+About the audio: LiveATC.net's terms only allow personal, non-commercial listening, require permission before linking directly to audio streams, and prohibit third-party use of the streams. So this app doesn't embed, proxy or deep-link audio. It links to LiveATC's own pages, credited to them. Not every airport has a feed. Oceanic and en-route coverage is patchy, so the "nearest" link may have no feed mid-ocean.
+
+To rebuild the airport table from a fresh OurAirports `airports.csv`: `python3 -I scripts/build_airports.py airports.csv data/airports.json`.
+
 How it works (`js/fr24.js`):
 - Search uses `GET /api/live/flight-positions/full` (type, route). Polling the followed flight uses the cheaper `/light` variant, every 10, 20 (default) or 60 s. Polling pauses in background tabs and backs off after errors.
 - FR24 units are converted to SI: `alt` ft → m, `gspeed` kt → m/s, `vspeed` fpm → m/s, `track` ° → rad.
@@ -100,6 +113,9 @@ js/main.js          viewer, flight model, cameras, HUD, instruments, input
 js/horizon.js       horizon math (pure, tested)
 js/terrain.js       Terrarium → Cesium heightmap provider
 js/fr24.js          Flightradar24 client, unit conversion, dead reckoning, demo traffic
+js/airports.js      airport lookup, great circles, LiveATC links
+data/airports.json  OurAirports subset (public domain)
+scripts/            build_airports.py (regenerates data/airports.json)
 worker/             optional CORS proxy (Cloudflare Worker) for the FR24 API
 tests/              node:test unit tests
 vendor/cesium/      CesiumJS build (Apache-2.0)
@@ -110,4 +126,6 @@ vendor/cesium/      CesiumJS build (Apache-2.0)
 - Code: MIT (see `LICENSE`). CesiumJS: Apache-2.0 (`vendor/cesium/LICENSE.md`).
 - Sentinel-2 cloudless — https://s2maps.eu by EOX IT Services GmbH (contains modified Copernicus Sentinel data). The 2020 layer is **non-commercial** (CC BY-NC-SA 4.0). For commercial use, switch the default to the 2016 layer (CC BY 4.0) or to OSM.
 - © OpenStreetMap contributors. Keep traffic light, as the [OSM tile usage policy](https://operations.osmfoundation.org/policies/tiles/) asks.
+- Airports: [OurAirports](https://ourairports.com/data/), public domain.
+- ATC audio: links to [LiveATC.net](https://www.liveatc.net/) pages only. Their streams are not embedded or redistributed.
 - Terrain Tiles on AWS Open Data (Mapzen). Sources include SRTM, GMTED2010, ETOPO1 and others.

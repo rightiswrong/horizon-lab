@@ -39,3 +39,13 @@ test('answers CORS preflight', async () => {
   assert.equal(res.status, 204);
   assert.match(res.headers.get('Access-Control-Allow-Headers'), /Accept-Version/);
 });
+
+test('allows flight-tracks and airport lookups, still blocks historic data', async () => {
+  globalThis.fetch = async () => new Response('{}', { status: 200 });
+  assert.equal((await worker.fetch(req('/api/flight-tracks?flight_id=3a1b2c'), env)).status, 200);
+  assert.equal((await worker.fetch(req('/api/sandbox/flight-tracks?flight_id=3a1b2c'), env)).status, 200);
+  assert.equal((await worker.fetch(req('/api/static/airports/KJFK/full'), env)).status, 200);
+  globalThis.fetch = async () => { throw new Error('should not be called'); };
+  assert.equal((await worker.fetch(req('/api/static/airports/../usage/full'), env)).status, 404);
+  assert.equal((await worker.fetch(req('/api/flight-summary/full'), env)).status, 404);
+});

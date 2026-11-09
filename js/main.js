@@ -2,6 +2,7 @@
 import * as HZ from './horizon.js';
 import { createTerrariumTerrain } from './terrain.js';
 import * as FR from './fr24.js';
+import * as AP from './airports.js';
 
 const DEG = Math.PI / 180;
 const G = 9.81;
@@ -655,6 +656,9 @@ const fr = {
   interval: $('fr-interval'), form: $('fr-search'), by: $('fr-by'), q: $('fr-q'), nearby: $('fr-nearby'), demo: $('fr-demo'),
   status: $('fr-status'), results: $('fr-results'), follow: $('fr-follow'), title: $('fr-follow-title'), meta: $('fr-follow-meta'),
   refresh: $('fr-refresh'), take: $('fr-take'), stop: $('fr-stop'),
+  optRoute: $('fr-opt-route'), optTrack: $('fr-opt-track'), optAtc: $('fr-opt-atc'),
+  route: $('fr-route'), from: $('fr-from'), to: $('fr-to'), destVis: $('fr-dest-vis'), trackNote: $('fr-track-note'),
+  atc: $('fr-atc'), atcLinks: $('fr-atc-links'),
 };
 
 function escapeHtml(t) { return String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -668,6 +672,13 @@ function load(k) { try { return localStorage.getItem(k); } catch { return null; 
   fr.sandbox.checked = load('fr24.sandbox') === '1';
   fr.proxy.value = load('fr24.proxy') || '';
   const iv = load('fr24.interval'); if (iv) fr.interval.value = iv;
+  for (const [el, key] of [[fr.optRoute, 'fr24.optRoute'], [fr.optTrack, 'fr24.optTrack'], [fr.optAtc, 'fr24.optAtc']]) {
+    const v = load(key); if (v !== null) el.checked = v === '1';
+    el.addEventListener('change', () => {
+      store(key, el.checked ? '1' : '0');
+      if (sim.mode === 'follow' && live.flight) showRoute(live.flight, { refetchTrack: el === fr.optTrack });
+    });
+  }
 })();
 const saveKey = () => store('fr24.key', fr.remember.checked && fr.key.value.trim() ? fr.key.value.trim() : null);
 fr.key.addEventListener('change', saveKey);
@@ -799,6 +810,7 @@ function follow(f) {
   if (matchMedia('(max-width: 760px), (pointer: coarse)').matches) togglePanel(false);
   toast(`Riding along with ${f.callsign || f.flight || f.reg}`);
   schedulePoll();
+  showRoute(f);
   updateFollowMeta();
 }
 
@@ -834,6 +846,7 @@ async function poll() {
       live.turnRate = turn;
       live.flight = { ...live.flight, ...Object.fromEntries(Object.entries(rec).filter(([, v]) => v !== null && v !== undefined)) };
       live.lastFixAt = now;
+      appendFlown({ lat: rec.lat, lon: rec.lon, altM: rec.altM, t: rec.t });
       setStatus(`Updated ${new Date(rec.t).toLocaleTimeString()} · source ${rec.source || 'n/a'}`);
     }
     live.backoff = 1;
@@ -875,6 +888,189 @@ function liveStep(dt) {
   if (plane.alt < plane.ground + 1.7) plane.alt = plane.ground + 1.7;
 }
 
+// ───────────────────────────── Route, flown path and ATC links ─────────────────────────────
+const route = {
+  token: 0, entities: [], orig: null, dest: null, flown: [], flownCart: [], remainingCart: [], remainingAt: 0,
+  nearby: null, nearbyAt: 0, trackState: '',
+};
+// Note: Cesium takes (longitude, latitude); this helper takes (lat, lon) to match the rest of the module.
+const C = (lat, lon, h = 0) => Cesium.Cartesian3.fromRadians(lon, lat, h);
+
+function clearRoute() {
+  route.token++;
+  route.entities.splice(0).forEach((e) => viewer.entities.remove(e));
+  route.orig = route.dest = route.nearby = null;
+  route.flown = []; route.flownCart = []; route.remainingCart = []; route.trackState = '';
+  fr.route.hidden = true; fr.atc.hidden = true;
+}
+
+function addRouteEntity(opts) { const e = viewer.entities.add(opts); route.entities.push(e); return e; }
+
+function airportMarker(a, css, role) {
+  const code = a.iata || a.icao;
+  let lastText = '', lastAt = 0;
+  const text = new Cesium.CallbackProperty(() => {
+    const now = performance.now();
+    if (now - lastAt < 500 && lastText) return lastText;
+    lastAt = now;
+    const R = HZ.wgs84LocalRadius(plane.lat);
+    const dist = AP.gcDistance(plane.lat, plane.lon, a.lat, a.lon);
+    const reach = HZ.surfaceDistance(Math.max(0, plane.alt), R) + HZ.surfaceDistance(a.elevFt * 0.3048 + 30, R);
+    lastText = `${role} ${code} · ${HZ.formatDistance(dist)}${dist > reach ? ' · below horizon' : ''}`;
+    return lastText;
+  }, false);
+  addRouteEntity({
+    position: C(a.lat, a.lon, a.elevFt * 0.3048),
+    point: { pixelSize: 11, color: Cesium.Color.fromCssColorString(css), outlineColor: Cesium.Color.BLACK, outlineWidth: 2,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY },
+    label: { text, font: '600 13px ui-monospace, Menlo, monospace',
+      fillColor: Cesium.Color.fromCssColorString(css), outlineColor: Cesium.Color.BLACK, outlineWidth: 3,
+      style: Cesium.LabelStyle.FILL_AND_OUTLINE, pixelOffset: new Cesium.Cartesian2(0, -18),
+      disableDepthTestDistance: Number.POSITIVE_INFINITY },
+  });
+}
+
+function setFlown(points) {
+  route.flown = points.slice();
+  route.flownCart = route.flown.map((p) => C(p.lat, p.lon, p.altM));
+}
+function appendFlown(p) {
+  const last = route.flown[route.flown.length - 1];
+  if (last && p.t <= last.t) return;
+  route.flown.push(p);
+  route.flownCart.push(C(p.lat, p.lon, p.altM));
+}
+
+async function resolveAirport(code) {
+  if (!code) return null;
+  const a = AP.lookupAirport(code);
+  if (a || live.demo || !live.client?.airport) return a;
+  try { return await live.client.airport(code); } catch { return null; }
+}
+
+async function showRoute(f, { refetchTrack = true } = {}) {
+  const keepFlown = !refetchTrack ? route.flown.slice() : null;
+  clearRoute();
+  const token = route.token;
+  if (!fr.optRoute.checked && !fr.optTrack.checked && !fr.optAtc.checked) return;
+  try { await AP.loadAirports(); } catch { /* bundled table missing: fall back to FR24 lookups */ }
+  const [orig, dest] = await Promise.all([resolveAirport(f.orig), resolveAirport(f.dest)]);
+  if (token !== route.token) return; // a newer follow/route replaced this one
+  route.orig = orig; route.dest = dest;
+
+  if (fr.optRoute.checked) {
+    if (orig) airportMarker(orig, '#7ee081', 'FROM');
+    if (dest) airportMarker(dest, '#ffd166', 'TO');
+    if (orig && dest) {
+      // Planned great circle, faint, on the ground.
+      addRouteEntity({ polyline: {
+        positions: AP.greatCirclePoints(orig.lat, orig.lon, dest.lat, dest.lon, 128).map((p) => C(p.lat, p.lon, 0)),
+        width: 1.5, arcType: Cesium.ArcType.NONE, material: Cesium.Color.WHITE.withAlpha(0.25) } });
+    }
+    if (dest) {
+      // Remaining leg: from the aircraft down to the destination, dashed (recomputed once a second).
+      addRouteEntity({ polyline: {
+        positions: new Cesium.CallbackProperty(() => {
+          const now = performance.now();
+          if (now - route.remainingAt > 1000 || !route.remainingCart.length) {
+            route.remainingAt = now;
+            // Start ~5 km ahead so the line doesn't pass through the cockpit camera.
+            const total = AP.gcDistance(plane.lat, plane.lon, dest.lat, dest.lon);
+            const t0 = Math.min(0.5, 5000 / Math.max(1, total));
+            const pts = AP.greatCirclePoints(plane.lat, plane.lon, dest.lat, dest.lon, 96, t0);
+            const h0 = plane.alt, h1 = dest.elevFt * 0.3048, n = pts.length - 1;
+            // Hold altitude, then descend on a ~3° glide (≈ 19 m along per 1 m down).
+            route.remainingCart = pts.map((p, i) => {
+              const togo = total * (1 - t0) * (1 - i / n);
+              const h = h1 + Math.min(h0 - h1, Math.max(0, togo / 19)) ;
+              return C(p.lat, p.lon, Math.max(h1, h));
+            });
+          }
+          return route.remainingCart;
+        }, false),
+        width: 2.5, arcType: Cesium.ArcType.NONE,
+        material: new Cesium.PolylineDashMaterialProperty({ color: Cesium.Color.fromCssColorString('#ffd166'), dashLength: 18 }) } });
+    }
+  }
+
+  if (fr.optTrack.checked || fr.optRoute.checked) {
+    // Flown path at true altitude: loaded history + live fixes + the aircraft itself.
+    addRouteEntity({ polyline: {
+      positions: new Cesium.CallbackProperty(() => (sim.view === 'cockpit' ? route.flownCart : route.flownCart.concat([planePos])), false),
+      width: 3, arcType: Cesium.ArcType.NONE,
+      material: new Cesium.PolylineGlowMaterialProperty({ glowPower: 0.15, color: Cesium.Color.fromCssColorString('#ff7a45') }) } });
+  }
+  if (keepFlown) setFlown(keepFlown);
+  else if (live.fix) appendFlown({ lat: live.fix.lat, lon: live.fix.lon, altM: live.fix.altM, t: live.fix.t });
+
+  fr.route.hidden = !fr.optRoute.checked && !fr.optTrack.checked;
+  fr.atc.hidden = !fr.optAtc.checked;
+  renderAtc(true);
+
+  if (fr.optTrack.checked && refetchTrack && f.id) {
+    route.trackState = 'Loading flown path…';
+    try {
+      const pts = await live.client.flightTrack(f.id);
+      if (token !== route.token) return;
+      const newer = route.flown.filter((p) => !pts.length || p.t > pts[pts.length - 1].t);
+      setFlown(pts.concat(newer));
+      route.trackState = pts.length ? `Flown path: ${pts.length} points from Flightradar24.` : 'No flown path returned for this flight.';
+    } catch (e) {
+      if (token !== route.token) return;
+      route.trackState = `Flown path unavailable: ${e.message}`;
+    }
+  } else if (!fr.optTrack.checked) {
+    route.trackState = 'Flown path: drawing from live updates only (history off).';
+  }
+}
+
+function renderRouteInfo() {
+  if (fr.route.hidden || !live.flight) return;
+  const f = live.flight;
+  const fmtKm = (m) => HZ.formatDistance(m);
+  const o = route.orig, d = route.dest;
+  fr.from.textContent = o
+    ? `${AP.airportLabel(o)} · ${fmtKm(AP.gcDistance(o.lat, o.lon, plane.lat, plane.lon))} behind`
+    : f.orig ? `${f.orig} (location unknown)` : 'not reported';
+  if (d) {
+    const togo = AP.gcDistance(plane.lat, plane.lon, d.lat, d.lon);
+    const eta = f.eta && f.eta > Date.now() ? f.eta : plane.speed > 30 ? Date.now() + (togo / plane.speed) * 1000 : null;
+    fr.to.textContent = `${AP.airportLabel(d)} · ${fmtKm(togo)} to go${eta ? ` · ETA ${new Date(eta).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${f.eta ? '' : ' (est.)'}` : ''}`;
+    // Tie-in with the horizon math: can you see the destination yet?
+    const R = HZ.wgs84LocalRadius(plane.lat);
+    const sEye = HZ.surfaceDistance(Math.max(0, plane.alt), R);
+    const sAirport = HZ.surfaceDistance(Math.max(0, d.elevFt * 0.3048 + 30), R); // ~30 m tower
+    const reach = sEye + sAirport;
+    fr.destVis.textContent = togo <= reach
+      ? `${d.iata || d.icao} is within line of sight now (horizon ${fmtKm(sEye)}).`
+      : `${d.iata || d.icao} is ${fmtKm(togo - reach)} beyond the horizon. Its tower comes into view at ${fmtKm(reach)} out.`;
+  } else {
+    fr.to.textContent = f.dest ? `${f.dest} (location unknown)` : 'not reported';
+    fr.destVis.textContent = '';
+  }
+  fr.trackNote.textContent = route.trackState;
+}
+
+function renderAtc(force) {
+  if (fr.atc.hidden) return;
+  const now = Date.now();
+  if (!force && now - route.nearbyAt < 10000) return;
+  route.nearbyAt = now;
+  route.nearby = AP.nearestAirport(plane.lat, plane.lon, 2);
+  const seen = new Set();
+  const links = [];
+  const add = (a, label) => {
+    const code = a?.icao;
+    if (!code || seen.has(code)) return;
+    seen.add(code);
+    links.push(`<a class="chip" href="${AP.liveatcUrl(code)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(a.name)}">${escapeHtml(label)} ${escapeHtml(a.iata || code)}</a>`);
+  };
+  add(route.orig, 'Departure');
+  add(route.nearby, 'Nearest');
+  add(route.dest, 'Arrival');
+  fr.atcLinks.innerHTML = links.join('') || '<span class="note">No airport codes available for this flight.</span>';
+}
+
 function updateFollowMeta() {
   if (sim.mode !== 'follow' || !live.flight) return;
   const f = live.flight;
@@ -888,6 +1084,8 @@ function updateFollowMeta() {
   bits.push(`position ${age}s old`);
   bits.push(live.polling ? 'updating…' : live.timer && next > 0 ? `next in ${next}s` : 'updates paused');
   fr.meta.textContent = `${bits.join(' · ')}${live.demo ? ' · DEMO DATA' : ''}`;
+  renderRouteInfo();
+  renderAtc(false);
   fr.title.textContent = f.callsign || f.flight || f.reg || 'Live flight';
 }
 setInterval(updateFollowMeta, 500);
@@ -908,6 +1106,7 @@ fr.take.addEventListener('click', () => takeControls());
 fr.stop.addEventListener('click', () => {
   takeControls(true);
   live.flight = null;
+  clearRoute();
   markActiveResult();
   setStatus('Stopped following. Traffic markers stay as a snapshot.');
 });
@@ -930,4 +1129,4 @@ setView('cockpit');
 highlightPresets();
 
 // Debug/automation hook (used by the smoke test; harmless in production).
-window.__sim = { plane, sim, live, poll, setAltitude, goTo, setView, startDemo, terrainStats: () => terrainProvider.stats() };
+window.__sim = { plane, sim, live, poll, route, setAltitude, goTo, setView, startDemo, terrainStats: () => terrainProvider.stats() };

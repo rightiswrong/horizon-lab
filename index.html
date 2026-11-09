@@ -78,6 +78,11 @@
         </label>
         <p class="note">Each update spends API credits. Updates use the cheaper "light" endpoint, and the view dead-reckons smoothly between them.</p>
       </details>
+      <div class="row wrap">
+        <label class="check"><input type="checkbox" id="fr-opt-route" checked> Airports &amp; route</label>
+        <label class="check"><input type="checkbox" id="fr-opt-track" checked> Flown path <span class="muted">(uses credits)</span></label>
+        <label class="check"><input type="checkbox" id="fr-opt-atc" checked> ATC audio links</label>
+      </div>
       <form id="fr-search" class="row">
         <select id="fr-by" aria-label="Search by">
           <option value="flights">Flight no.</option>
@@ -96,6 +101,17 @@
       <div id="fr-follow" class="follow" hidden>
         <div id="fr-follow-title" class="follow-title"></div>
         <div id="fr-follow-meta" class="note"></div>
+        <div id="fr-route" class="route" hidden>
+          <div class="route-row"><span class="dot from"></span><span class="label">From</span><span id="fr-from" class="rv"></span></div>
+          <div class="route-row"><span class="dot to"></span><span class="label">To</span><span id="fr-to" class="rv"></span></div>
+          <div id="fr-dest-vis" class="note"></div>
+          <div id="fr-track-note" class="note"></div>
+        </div>
+        <div id="fr-atc" class="atc" hidden>
+          <span class="label">ATC audio · <a href="https://www.liveatc.net/" target="_blank" rel="noopener noreferrer">LiveATC.net</a></span>
+          <div id="fr-atc-links" class="row wrap"></div>
+          <p class="note">Opens LiveATC.net's own player in a new tab. Not every airport has a feed. LiveATC is for personal, non-commercial listening.</p>
+        </div>
         <div class="row wrap">
           <button id="fr-refresh" class="chip" type="button">Update now</button>
           <button id="fr-take" class="chip" type="button">Take the controls</button>
@@ -159,7 +175,7 @@
       <p>Seeing a peak of height <i>H</i>: d<sub>max</sub> = √(2Rh) + √(2RH).</p>
     </details>
 
-    <p class="credits">Engine: CesiumJS (Apache-2.0). Imagery: Sentinel-2 cloudless by EOX (contains modified Copernicus Sentinel data) or © OpenStreetMap contributors. Terrain: AWS Terrain Tiles. Live flight data: Flightradar24 API (your own key).</p>
+    <p class="credits">Engine: CesiumJS (Apache-2.0). Imagery: Sentinel-2 cloudless by EOX (contains modified Copernicus Sentinel data) or © OpenStreetMap contributors. Terrain: AWS Terrain Tiles. Live flight data: Flightradar24 API (your own key). Airports: OurAirports (public domain). ATC audio links: LiveATC.net.</p>
   </aside>
 
   <!-- Touch controls -->

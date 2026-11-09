@@ -46,8 +46,21 @@ export function parseRecord(r, nowMs = Date.now()) {
     track: ((+r.track || 0) % 360) * DEG,
     vs: (+r.vspeed || 0) * FPM,
     source: r.source ?? null,
+    eta: r.eta && Number.isFinite(Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(r.eta) ? r.eta : `${r.eta}Z`))
+      ? Date.parse(/[zZ]|[+-]\d\d:?\d\d$/.test(r.eta) ? r.eta : `${r.eta}Z`) : null,
     t,
   };
+}
+
+/** Normalise a /flight-tracks response (array, {data:[]}, or single object) to [{lat,lon,altM,t}]. */
+export function parseTrack(body, fr24Id) {
+  const list = Array.isArray(body) ? body : Array.isArray(body?.data) ? body.data : body ? [body] : [];
+  const entry = list.find((e) => e && e.fr24_id === fr24Id) || list.find((e) => Array.isArray(e?.tracks));
+  const pts = (entry?.tracks || [])
+    .map((p) => ({ lat: +p.lat * DEG, lon: +p.lon * DEG, altM: Math.max(0, (+p.alt || 0) * FT), t: Date.parse(p.timestamp) || 0 }))
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon));
+  pts.sort((a, b) => a.t - b.t);
+  return pts;
 }
 
 /** Short human label for a result list. */
@@ -203,6 +216,7 @@ export class FR24Client {
         'network');
     }
     if (res.status === 401 || res.status === 403) throw new FR24Error('API key rejected (401/403). Check the key, and tick "Sandbox key" if you are using the sandbox token.', 'auth', res.status);
+    if (res.status === 404 && !path.startsWith('/live/')) throw new FR24Error('Not found (404).', 'notfound', 404);
     if (res.status === 402) throw new FR24Error('No API credits left on this account (402).', 'credits', res.status);
     if (res.status === 429) {
       const ra = res.headers.get('Retry-After');
@@ -215,15 +229,36 @@ export class FR24Client {
       const kind = res.status === 400 || res.status === 422 ? 'validation' : 'http';
       throw new FR24Error(`Flightradar24 error ${res.status}${detail ? `: ${detail}` : ''} (request: ${path}${query ? `?${query}` : ''})`, kind, res.status);
     }
-    const body = await res.json();
+    return res.json();
+  }
+
+  async getList(path, params) {
+    const body = await this.get(path, params);
     return Array.isArray(body?.data) ? body.data : [];
   }
 
   /** Live positions. variant 'light' (cheaper, used for polling) or 'full' (route/type, used for search). */
   async live(params, variant = 'full') {
     const now = Date.now();
-    const rows = await this.get(`/live/flight-positions/${variant}`, params);
+    const rows = await this.getList(`/live/flight-positions/${variant}`, params);
     return rows.map((r) => parseRecord(r, now)).filter(Boolean);
+  }
+
+  /** Flown path so far for a flight leg (credits are charged per point by FR24). */
+  async flightTrack(fr24Id) {
+    const id = String(fr24Id || '').replace(/[^0-9a-fA-F]/g, '');
+    if (!id) throw new FR24Error('This flight has no Flightradar24 ID, so its path can\'t be loaded.', 'validation');
+    return parseTrack(await this.get('/flight-tracks', { flight_id: id }), id);
+  }
+
+  /** Airport details incl. coordinates (fallback for codes missing from the bundled table). */
+  async airport(code) {
+    const c = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (c.length < 3 || c.length > 4) return null;
+    const a = await this.get(`/static/airports/${c}/full`);
+    if (!a || !Number.isFinite(+a.lat)) return null;
+    return { icao: a.icao || null, iata: a.iata || null, name: a.name || c, lat: +a.lat * DEG, lon: +a.lon * DEG,
+      elevFt: +a.elevation || 0, city: a.city || '', country: a.country?.code || '', size: 2 };
   }
 }
 
@@ -236,11 +271,11 @@ export class MockFR24Client {
     this.t0 = Date.now();
     this.sandbox = false; this.viaProxy = false; this.mock = true;
     const specs = [
-      ['DEMO123', 'B789', 'LHR', 'SIN', 37000, 488, 255, 0, 0.0],
-      ['DEMO77', 'A21N', 'JFK', 'LAX', 34000, 452, 120, -800, 0.15],
-      ['DEMO9', 'C172', 'HNL', 'OGG', 4500, 105, 40, 0, -0.9],
-      ['DEMO400', 'B77W', 'DXB', 'SYD', 41000, 510, 300, 0, 0.4],
-      ['DEMOGA', 'PC12', 'SFO', 'RNO', 18000, 260, 65, 1200, -0.3],
+      ['DEMO123', 'B789', 'HNL', 'LAX', 37000, 488, 60, 0, 0.0],
+      ['DEMO77', 'A21N', 'SFO', 'OGG', 34000, 452, 230, -800, 0.15],
+      ['DEMO9', 'C172', 'HNL', 'OGG', 4500, 105, 95, 0, -0.9],
+      ['DEMO400', 'B77W', 'SYD', 'HNL', 41000, 510, 45, 0, 0.0],
+      ['DEMOGA', 'PC12', 'HNL', 'KOA', 18000, 260, 130, 1200, -0.3],
       ['', 'GLF5', null, null, 43000, 470, 200, 0, 0.1], // no callsign/reg/flight, like many MLAT targets
     ];
     this.ac = specs.map(([cs, type, o, d, alt, gs, trk, vs, turn], i) => ({
@@ -252,16 +287,16 @@ export class MockFR24Client {
   }
 
   record(a, nowMs) {
-    const dt = (nowMs - this.t0) / 1000;
+    const dt = (nowMs - this.t0) / 1000; // may be negative (history for flightTrack)
     const trackRad0 = a.track0 * DEG;
     const turn = a.turnDegS * DEG;
     const track = trackRad0 + turn * dt;
-    const alt = Math.max(0, a.alt0 + (a.vspeed / 60) * Math.min(dt, 600));
+    const alt = Math.max(0, a.alt0 + (a.vspeed / 60) * Math.max(0, Math.min(dt, 600)));
     const vs = dt < 600 ? a.vspeed : 0;
     const R = wgs84LocalRadius(a.lat0 * DEG) + alt * FT;
     // Integrate the arc numerically (coarse steps are fine for a demo).
     let lat = a.lat0 * DEG, lon = a.lon0 * DEG;
-    const steps = Math.max(1, Math.ceil(dt / 10));
+    const steps = Math.max(1, Math.ceil(Math.abs(dt) / 10));
     for (let i = 0; i < steps; i++) {
       const h = dt / steps;
       const p = destination(lat, lon, trackRad0 + turn * (i + 0.5) * h, (a.gspeed * KT * h) / R);
@@ -273,8 +308,24 @@ export class MockFR24Client {
       lat: lat / DEG, lon: lon / DEG, alt: Math.round(alt), gspeed: a.gspeed, vspeed: vs,
       track: Math.round((((track / DEG) % 360) + 360) % 360), squawk: '1200', source: 'MOCK',
       timestamp: new Date(nowMs - 2000).toISOString(),
+      eta: a.dest_iata ? new Date(this.t0 + 3 * 3600e3).toISOString() : null,
     };
   }
+
+  async flightTrack(fr24Id) {
+    const a = this.ac.find((x) => x.fr24_id === fr24Id);
+    if (!a) throw new FR24Error('Not found (404).', 'notfound', 404);
+    const now = Date.now();
+    const pts = [];
+    // 40 minutes of history, one point per minute, by flying the same path backwards in time.
+    for (let m = 40; m >= 0; m--) {
+      const r = this.record(a, now - m * 60000);
+      pts.push({ lat: r.lat * DEG, lon: r.lon * DEG, altM: r.alt * FT, t: now - m * 60000 });
+    }
+    return pts;
+  }
+
+  async airport() { return null; }
 
   async live(params) {
     const now = Date.now();
